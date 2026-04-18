@@ -26,9 +26,6 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/insights', insightRoutes);
 app.use('/api/research', researchRoutes);
 
-app.get('/', (req, res) => {
-  res.send('Curalink API is running...');
-});
 
 // Serve frontend in production
 if (process.env.NODE_ENV === 'production') {

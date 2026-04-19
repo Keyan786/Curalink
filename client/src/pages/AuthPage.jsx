@@ -14,19 +14,15 @@ const AuthPage = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
 
-  const handleSubmit = async (e) => {
+const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
       const endpoint = isLogin ? '/auth/login' : '/auth/signup';
       const res = await api.post(endpoint, { email, password });
-      login(res.data.token, res.data.userId, res.data.onboarded);
-      if (res.data.onboarded) {
-        navigate('/dashboard');
-      } else {
-        navigate('/onboarding');
-      }
+      login(res.data.token, res.data.userId);
+      navigate('/dashboard');
     } catch (err) {
       setError(err.response?.data?.message || 'Authentication failed. Please try again.');
     } finally {
@@ -45,7 +41,7 @@ const AuthPage = () => {
           <Activity size={48} color="var(--primary)" style={{ marginBottom: 16 }} />
           <h2 style={{ marginBottom: 8 }}>{isLogin ? 'Welcome Back' : 'Create Account'}</h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
-            {isLogin ? 'Enter your details to access your health mentor' : 'Start your journey to personalized wellness'}
+            {isLogin ? 'Sign in to access your research dashboard' : 'Start exploring medical research evidence'}
           </p>
         </div>
 
@@ -116,8 +112,8 @@ const AuthPage = () => {
         </div>
 
         <p style={{ textAlign: 'center', fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 28, lineHeight: 1.6 }}>
-          By continuing, you agree to Curalink's Privacy Policy and Terms of Use.
-          Your health data is protected and kept secure.
+          By continuing, you agree to Curalink's Privacy Policy.<br />
+          We do not store or process personal health information.
         </p>
       </div>
     </div>

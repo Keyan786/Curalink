@@ -4,8 +4,12 @@
   "description": "Curalink - AI-powered clinical research and chat",
   "scripts": {
     "build": "npm install --prefix client && npm run build --prefix client && npm install --prefix server --omit=dev",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "dev": "concurrently \"npm run start\" \"npm run dev --prefix client\""
   },
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
 }

@@ -3,6 +3,10 @@ const { searchPubMed } = require('./pubmedService');
 const { searchClinicalTrials } = require('./clinicalTrialsService');
 const ResearchCache = require('../models/ResearchCache');
 
+// ─── Constants ───
+const LOW_EVIDENCE_THRESHOLD = 40; // Minimum avg score for results to be considered reliable
+const SNIPPET_SENTENCE_COUNT = 3;  // Number of complete sentences to extract from abstracts
+
 /**
  * Normalize a query string into a stable cache key.
  * Lowercases, trims, collapses whitespace, and sorts words for fuzzy dedup.
@@ -48,21 +52,39 @@ async function aggregateResearch(query, profile = {}) {
     console.error('[Research] Cache lookup failed (non-blocking):', err.message);
   }
 
-  console.log(`[Research] Cache MISS — performing deep retrieval for: "${enrichedQuery.slice(0, 80)}..."`);
-
-  // ─── Step 1: Deep Retrieval — parallel fetch from all 3 sources ───
-  const [openAlexResults, pubmedResults, trialResults] = await Promise.allSettled([
-    searchOpenAlex(enrichedQuery, 100),
-    searchPubMed(enrichedQuery, 80),
-    searchClinicalTrials(enrichedQuery, 50)
-  ]);
-
-  const publications = [
-    ...(openAlexResults.status === 'fulfilled' ? openAlexResults.value : []),
-    ...(pubmedResults.status === 'fulfilled' ? pubmedResults.value : [])
+  // ─── Step 1: Multi-Query Expansion ───
+  // Generate 3 queries for deeper retrieval
+  const queries = [
+    enrichedQuery,
+    `${enrichedQuery} clinical trials OR outcomes`,
+    `${profile?.medicalHistory?.conditions?.[0] || 'general'} ${query} survival OR treatment`
   ];
 
-  const trials = trialResults.status === 'fulfilled' ? trialResults.value : [];
+  console.log(`[Research] Cache MISS — performing deep retrieval for ${queries.length} expanded queries...`);
+
+  // ─── Step 2: Parallel Fetch across all queries and sources ───
+  const fetchPromises = [];
+  for (const q of queries) {
+    fetchPromises.push(searchOpenAlex(q, 40));
+    fetchPromises.push(searchPubMed(q, 40));
+    fetchPromises.push(searchClinicalTrials(q, 25));
+  }
+
+  const results = await Promise.allSettled(fetchPromises);
+
+  const publications = [];
+  const trials = [];
+
+  results.forEach((res, index) => {
+    if (res.status === 'fulfilled') {
+      // Determine what type of result this was based on the index
+      if (index % 3 === 2) {
+        trials.push(...res.value);
+      } else {
+        publications.push(...res.value);
+      }
+    }
+  });
 
   console.log(`[Research] Deep retrieval: ${publications.length} publications, ${trials.length} trials`);
 
@@ -83,20 +105,50 @@ async function aggregateResearch(query, profile = {}) {
   }));
   scoredTrials.sort((a, b) => b._score - a._score);
 
-  // ─── Step 5: Select top results ───
-  const topPubs = scoredPubs.slice(0, 6).map(({ _score, ...rest }) => rest);
-  const topTrials = scoredTrials.slice(0, 3).map(({ _score, ...rest }) => rest);
+  // ─── Step 5: Select top results + enrich with snippets & confidence tier ───
+  const topPubs = scoredPubs.slice(0, 8).map(({ _score, ...rest }) => ({
+    ...rest,
+    snippet: extractSnippet(rest.abstract),
+    confidenceTier: classifyStudyConfidence(rest.title, rest.abstract),
+    relevanceScore: Math.round(_score)
+  }));
+  const topTrials = scoredTrials.slice(0, 4).map(({ _score, ...rest }) => rest);
+
+  // ─── Step 6: Calculate Confidence Score + Evidence Strength ───
+  let confidenceScore = 'Low Evidence';
+  const avgScore = topPubs.length > 0
+    ? topPubs.reduce((sum, p) => sum + p.relevanceScore, 0) / topPubs.length
+    : 0;
+  const isLowEvidence = topPubs.length === 0 || avgScore < LOW_EVIDENCE_THRESHOLD;
+
+  if (topPubs.length > 0) {
+    const hasHighEviStudy = topPubs.some(p =>
+      p.confidenceTier === 'High' || p.confidenceTier === 'Very High'
+    );
+    if (hasHighEviStudy && topPubs.length >= 3) {
+      confidenceScore = 'High Evidence';
+    } else if (topPubs.length >= 2 && !isLowEvidence) {
+      confidenceScore = 'Moderate Evidence';
+    }
+  }
+
+  // Determine if we have enough quality data for Research Mode
+  const isResearchMode = !isLowEvidence && topPubs.length >= 2;
 
   const meta = {
     totalRetrieved: publications.length + trials.length,
     totalAfterDedup: dedupedPubs.length + trials.length,
     finalSelected: topPubs.length + topTrials.length,
+    confidenceScore,
+    isLowEvidence,
+    isResearchMode,
+    averageRelevance: Math.round(avgScore),
     query: enrichedQuery
   };
 
-  console.log(`[Research] Final selection: ${topPubs.length} publications, ${topTrials.length} trials`);
+  console.log(`[Research] Final: ${topPubs.length} pubs (avg relevance: ${Math.round(avgScore)}), ${topTrials.length} trials | Mode: ${isResearchMode ? 'Research' : 'Quick'} | Confidence: ${confidenceScore}`);
 
-  // ─── Step 6: Store in cache (non-blocking) ───
+  // ─── Step 7: Store in cache (non-blocking) ───
   try {
     await ResearchCache.findOneAndUpdate(
       { queryKey: cacheKey },
@@ -163,60 +215,106 @@ function deduplicateByTitle(publications) {
 }
 
 /**
- * Score a publication based on relevance, recency, and credibility.
+ * Extract the first N complete sentences from an abstract.
+ * Uses sentence-boundary detection instead of raw character cuts.
+ */
+function extractSnippet(abstract) {
+  if (!abstract || abstract.trim().length === 0) return '';
+
+  // Split on sentence boundaries: period/exclamation/question followed by space or end-of-string
+  const sentences = abstract.match(/[^.!?]*[.!?]+(?:\s|$)/g);
+  if (!sentences || sentences.length === 0) {
+    // Fallback: if no sentence boundaries found, take first 250 chars cleanly
+    return abstract.length <= 250 ? abstract : abstract.slice(0, 250).replace(/\s+\S*$/, '') + '...';
+  }
+
+  let snippet = '';
+  for (let i = 0; i < Math.min(sentences.length, SNIPPET_SENTENCE_COUNT); i++) {
+    snippet += sentences[i].trim() + ' ';
+  }
+  return snippet.trim();
+}
+
+/**
+ * Classify a publication's confidence tier based on study design.
+ * Returns: 'Very High' | 'High' | 'Moderate' | 'Low'
+ */
+function classifyStudyConfidence(title, abstract) {
+  const text = `${(title || '')} ${(abstract || '')}`.toLowerCase();
+
+  if (text.includes('meta-analysis')) return 'Very High';
+  if (text.includes('systematic review')) return 'Very High';
+  if (text.includes('randomized controlled trial') || text.match(/\brct\b/)) return 'High';
+  if (text.includes('clinical trial') || text.includes('double-blind')) return 'High';
+  if (text.includes('cohort study') || text.includes('prospective study')) return 'Moderate';
+  if (text.includes('observational study') || text.includes('cross-sectional')) return 'Moderate';
+  if (text.includes('case report') || text.includes('case series')) return 'Low';
+  return 'Low'; // Default for unclassifiable studies
+}
+
+/**
+ * Score a publication based on relevance, recency, credibility, and study type.
  */
 function scorePublication(pub, query, profile) {
-  let score = 0;
+  let keywordScore = 0;
+  let recencyScore = 0;
+  let citationScore = 0;
+  let studyTypeScore = 0;
+  let diseaseBoost = 0;
+
   const currentYear = new Date().getFullYear();
   const queryLower = query.toLowerCase();
   const titleLower = (pub.title || '').toLowerCase();
   const abstractLower = (pub.abstract || '').toLowerCase();
 
-  // Relevance: title match (high weight)
+  // 1. Keyword Relevance
   const queryWords = queryLower.split(/\s+/).filter(w => w.length > 3);
   for (const word of queryWords) {
-    if (titleLower.includes(word)) score += 15;
-    if (abstractLower.includes(word)) score += 5;
+    if (titleLower.includes(word)) keywordScore += 20;
+    if (abstractLower.includes(word)) keywordScore += 5;
   }
 
-  // Profile condition match (strong signal)
+  // 2. Disease Boost (explicit mentions in title/abstract)
   const conditions = (profile?.medicalHistory?.conditions || []).map(c => c.toLowerCase());
   for (const cond of conditions) {
-    if (titleLower.includes(cond)) score += 20;
-    if (abstractLower.includes(cond)) score += 10;
+    if (titleLower.includes(cond)) diseaseBoost += 30;
+    if (abstractLower.includes(cond)) diseaseBoost += 15;
   }
 
-  // Symptom match
-  const symptoms = (profile?.currentSymptoms || []).map(s => s.toLowerCase());
-  for (const sym of symptoms) {
-    if (titleLower.includes(sym)) score += 12;
-    if (abstractLower.includes(sym)) score += 6;
-  }
-
-  // Recency: papers from recent years get a boost
+  // 3. Recency Score
   if (pub.year) {
     const age = currentYear - pub.year;
-    if (age <= 2) score += 20;
-    else if (age <= 5) score += 12;
-    else if (age <= 10) score += 5;
+    if (age <= 2) recencyScore = 100;
+    else if (age <= 5) recencyScore = 70;
+    else if (age <= 10) recencyScore = 30;
+    else recencyScore = 0; // Penalize old papers
   }
 
-  // Credibility: citation count (logarithmic scale)
+  // 4. Citation Count Score (logarithmic)
   if (pub.citations > 0) {
-    score += Math.min(Math.log10(pub.citations) * 8, 25);
+    citationScore = Math.min(Math.log10(pub.citations) * 20, 100);
   }
 
-  // Abstract presence bonus
-  if (pub.abstract && pub.abstract.length > 100) score += 8;
+  // 5. Study Type Score (Crucial for evidence quality)
+  const combinedText = `${titleLower} ${abstractLower}`;
+  if (combinedText.includes('meta-analysis')) studyTypeScore += 100;
+  if (combinedText.includes('systematic review')) studyTypeScore += 90;
+  if (combinedText.includes('randomized controlled trial') || combinedText.includes(' rct ')) studyTypeScore += 80;
+  if (combinedText.includes('clinical trial')) studyTypeScore += 60;
+  if (combinedText.includes('observational study') || combinedText.includes('cohort study')) studyTypeScore += 40;
 
-  // Source quality bonus (known high-impact journals)
-  const highImpactJournals = ['lancet', 'nejm', 'bmj', 'jama', 'nature', 'science', 'cell', 'plos'];
-  if (highImpactJournals.some(j => (pub.source || '').toLowerCase().includes(j))) {
-    score += 15;
-  }
+  // Final Weighted Formula:
+  // Relevance (40%) + Recency (20%) + Citations (20%) + Study Type (20%) + Disease Boost (Additive)
+  const finalScore = 
+    ((keywordScore / 100) * 40) + 
+    ((recencyScore / 100) * 20) + 
+    ((citationScore / 100) * 20) + 
+    ((studyTypeScore / 100) * 20) + 
+    diseaseBoost;
 
-  return score;
+  return finalScore;
 }
+
 
 /**
  * Score a clinical trial based on relevance, recency, and status.

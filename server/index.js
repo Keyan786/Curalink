@@ -1,17 +1,26 @@
-const express = require('express');
+// Load environment variables FIRST before anything else
 const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config({ path: path.join(__dirname, '.env') });
+
+// Guard: abort if critical env vars are missing
+if (!process.env.JWT_SECRET) {
+  console.error('❌ JWT_SECRET is missing in .env — server cannot start.');
+  process.exit(1);
+}
+if (!process.env.MONGODB_URI) {
+  console.error('❌ MONGODB_URI is missing in .env — server cannot start.');
+  process.exit(1);
+}
+
+const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
 
-// Import Routes
+// Routes
 const authRoutes = require('./routes/auth');
-const profileRoutes = require('./routes/profile');
 const chatRoutes = require('./routes/chat');
-const insightRoutes = require('./routes/insights');
 const researchRoutes = require('./routes/research');
-
-dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 
@@ -19,38 +28,28 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Routes
+// API Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/profile', profileRoutes);
 app.use('/api/chat', chatRoutes);
-app.use('/api/insights', insightRoutes);
 app.use('/api/research', researchRoutes);
 
-
-// Serve frontend in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/dist')));
-
-  app.get('*splat', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/dist', 'index.html'));
-  });
-}
+// Serve built frontend
+const distPath = path.join(__dirname, '../client/dist');
+app.use(express.static(distPath));
+app.get('*splat', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
 const PORT = process.env.PORT || 5001;
-const MONGODB_URI = process.env.MONGODB_URI;
 
-if (!MONGODB_URI) {
-  console.error('MONGODB_URI is not defined in .env file');
-  process.exit(1);
-}
-
-mongoose.connect(MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
-    console.log('Connected to MongoDB Atlas');
+    console.log('✅ Connected to MongoDB Atlas');
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`🚀 Server running on port ${PORT}`);
     });
   })
   .catch((err) => {
-    console.error('MongoDB connection error:', err);
+    console.error('❌ MongoDB connection error:', err.message);
+    process.exit(1);
   });

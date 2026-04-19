@@ -1,5 +1,4 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
-import api from '../api/api';
 
 const AuthContext = createContext();
 
@@ -11,20 +10,17 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     if (token) {
       localStorage.setItem('token', token);
-      // Here we could fetch user profile to verify token
-      setUser({ userId: localStorage.getItem('userId'), onboarded: localStorage.getItem('onboarded') === 'true' });
+      setUser({ userId: localStorage.getItem('userId') });
     } else {
       localStorage.removeItem('token');
       localStorage.removeItem('userId');
-      localStorage.removeItem('onboarded');
       setUser(null);
     }
     setLoading(false);
   }, [token]);
 
-  const login = (newToken, userId, onboarded) => {
+  const login = (newToken, userId) => {
     localStorage.setItem('userId', userId);
-    localStorage.setItem('onboarded', onboarded);
     setToken(newToken);
   };
 
@@ -32,13 +28,8 @@ export const AuthProvider = ({ children }) => {
     setToken(null);
   };
 
-  const updateOnboarding = (status) => {
-    localStorage.setItem('onboarded', status);
-    setUser(prev => ({ ...prev, onboarded: status }));
-  };
-
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout, updateOnboarding }}>
+    <AuthContext.Provider value={{ user, token, loading, login, logout }}>
       {!loading && children}
     </AuthContext.Provider>
   );

@@ -92,10 +92,3 @@ Curalink follows the **Reliability 2.0** framework:
 3.  **Audit & Repair**: The model's response is audited for structural integrity. If a JSON failure is detected, a secondary "1-shot repair" mechanism fixes the structure without altering the scientific claims.
 4.  **Analytics Persistence**: Keywords and sources are saved to the user's profile to drive the dynamic dashboard.
 
----
-
-## 📜 License
-This project is licensed under the ISC License.
-
----
-*Created by the Curalink Engineering Team.*
